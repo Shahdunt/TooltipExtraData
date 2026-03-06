@@ -3,24 +3,26 @@ local addonName, TED = ...
 TooltipExtraDataDB = TooltipExtraDataDB or {}
 
 -- =========================
--- Defaults (simple + extensible)
+-- Defaults
 -- =========================
 local defaults = {
   enabled = true,
   colorGray = "808080",
 
   modules = {
-    stack  = true,  -- shows current/max on right side of title (bags/loot only)
-    itemid = true,  -- shows ItemID on item tooltips
-    spellid = true, -- shows SpellID on spell tooltips
-    iconid = true,  -- shows IconID (texture FileID) below ItemID/SpellID
+    stack  = true,  -- current/max stack
+    itemid = true,  -- ItemID on item tooltips
+    spellid = true, -- SpellID on spell tooltips
+    iconid = true,  -- IconID (texture FileID) below ItemID/SpellID
   },
 }
 
 local function CopyDefaults(dst, src)
   for k, v in pairs(src) do
     if type(v) == "table" then
-      if type(dst[k]) ~= "table" then dst[k] = {} end
+      if type(dst[k]) ~= "table" then
+        dst[k] = {}
+      end
       CopyDefaults(dst[k], v)
     elseif dst[k] == nil then
       dst[k] = v
@@ -42,32 +44,56 @@ local function ModuleOn(key)
 end
 
 -- =========================
+-- Tooltip state helpers
+-- =========================
+local function ensureTooltipState(tooltip)
+  if not tooltip then return nil end
+  tooltip.TED_State = tooltip.TED_State or {}
+  return tooltip.TED_State
+end
+
+local function wasAdded(tooltip, key, value)
+  local state = ensureTooltipState(tooltip)
+  if not state then return false end
+  return state[key] == value
+end
+
+local function markAdded(tooltip, key, value)
+  local state = ensureTooltipState(tooltip)
+  if not state then return end
+  state[key] = value
+end
+
+local function clearTooltipState(tooltip)
+  if tooltip then
+    tooltip.TED_State = nil
+  end
+end
+
+-- =========================
 -- Tooltip helpers
 -- =========================
 local function getTooltipName(tooltip)
   return tooltip and tooltip.GetName and tooltip:GetName() or nil
 end
 
-local function alreadyHasLine(tooltip, needle)
-  local name = getTooltipName(tooltip)
-  if not name then return false end
-
-  for i = tooltip:NumLines(), 1, -1 do
-    local left = _G[name .. "TextLeft" .. i]
-    if left then
-      local t = left:GetText()
-      if t and t:find(needle, 1, true) then
-        return true
-      end
-    end
-  end
-  return false
-end
-
 local function addDoubleLine(tooltip, leftText, rightText)
   if not tooltip or not tooltip.AddDoubleLine then return end
-  tooltip:AddDoubleLine(leftText, rightText, nil, nil, nil, WHITE_FONT_COLOR.r, WHITE_FONT_COLOR.g, WHITE_FONT_COLOR.b)
+  tooltip:AddDoubleLine(
+    leftText,
+    rightText,
+    nil, nil, nil,
+    WHITE_FONT_COLOR.r,
+    WHITE_FONT_COLOR.g,
+    WHITE_FONT_COLOR.b
+  )
   tooltip:Show()
+end
+
+local function SafeHookScript(frame, scriptName, fn)
+  if frame and frame.HasScript and frame:HasScript(scriptName) then
+    frame:HookScript(scriptName, fn)
+  end
 end
 
 -- =========================
@@ -82,18 +108,18 @@ local GetSpellTexture = (C_Spell and C_Spell.GetSpellTexture) and C_Spell.GetSpe
 -- =========================
 TED.Modules = {}
 
--- ---- Stack module: right side of title, gray, "current/max"
+-- ---- Stack module
 function TED.Modules.Stack(tooltip, itemId, currentCount)
   if not ModuleOn("stack") then return end
   if not GetItemMaxStackSizeByID then return end
-  if not tooltip or not itemId or not currentCount then return end
+  if not tooltip or not itemId or currentCount == nil then return end
 
   local itemIdNum = tonumber(itemId)
   local currentNum = tonumber(currentCount)
   if not itemIdNum or not currentNum then return end
 
   local maxStack = GetItemMaxStackSizeByID(itemIdNum)
-  if not maxStack or maxStack <= 1 then return end -- omit non-stackables
+  if not maxStack or maxStack <= 1 then return end
 
   local name = getTooltipName(tooltip)
   if not name then return end
@@ -101,15 +127,17 @@ function TED.Modules.Stack(tooltip, itemId, currentCount)
   local right1 = _G[name .. "TextRight1"]
   if not right1 then return end
 
-  local stackText = Gray(currentNum .. "/" .. maxStack)
-  if right1:GetText() == stackText then return end
+  local stackKey = tostring(currentNum) .. "/" .. tostring(maxStack)
+  if wasAdded(tooltip, "stack", stackKey) then return end
 
-  right1:SetText(stackText)
+  right1:SetText(Gray(stackKey))
   right1:Show()
   tooltip:Show()
+
+  markAdded(tooltip, "stack", stackKey)
 end
 
--- ---- ItemID module: adds "ItemID" line
+-- ---- ItemID module
 function TED.Modules.ItemID(tooltip, itemId)
   if not ModuleOn("itemid") then return end
   if not tooltip or not itemId then return end
@@ -117,11 +145,12 @@ function TED.Modules.ItemID(tooltip, itemId)
   itemId = tonumber(itemId)
   if not itemId then return end
 
-  if alreadyHasLine(tooltip, "ItemID") then return end
+  if wasAdded(tooltip, "itemid", itemId) then return end
   addDoubleLine(tooltip, "ItemID", tostring(itemId))
+  markAdded(tooltip, "itemid", itemId)
 end
 
--- ---- SpellID module: adds "SpellID" line
+-- ---- SpellID module
 function TED.Modules.SpellID(tooltip, spellId)
   if not ModuleOn("spellid") then return end
   if not tooltip or not spellId then return end
@@ -129,11 +158,12 @@ function TED.Modules.SpellID(tooltip, spellId)
   spellId = tonumber(spellId)
   if not spellId then return end
 
-  if alreadyHasLine(tooltip, "SpellID") then return end
+  if wasAdded(tooltip, "spellid", spellId) then return end
   addDoubleLine(tooltip, "SpellID", tostring(spellId))
+  markAdded(tooltip, "spellid", spellId)
 end
 
--- ---- IconID module: shows normal AddDoubleLine under ItemID/SpellID (default colors)
+-- ---- IconID module
 function TED.Modules.IconID(tooltip, iconId)
   if not ModuleOn("iconid") then return end
   if not tooltip or not iconId then return end
@@ -141,15 +171,15 @@ function TED.Modules.IconID(tooltip, iconId)
   iconId = tonumber(iconId)
   if not iconId then return end
 
-  if alreadyHasLine(tooltip, "IconID") then return end
+  if wasAdded(tooltip, "iconid", iconId) then return end
   addDoubleLine(tooltip, "IconID", tostring(iconId))
+  markAdded(tooltip, "iconid", iconId)
 end
 
 -- =========================
 -- Data extraction / hooks
 -- =========================
 
--- Items: from tooltip itself (works for most item tooltips, chat links too)
 local function handleItemFromTooltip(tooltip)
   if not Enabled() then return end
   if not tooltip or not tooltip.GetItem then return end
@@ -160,7 +190,6 @@ local function handleItemFromTooltip(tooltip)
   local itemId = tonumber(link:match("item:(%d+)"))
   if not itemId then return end
 
-  -- Order matters: ItemID first, then IconID below it
   TED.Modules.ItemID(tooltip, itemId)
 
   local iconId = GetItemIconByID and GetItemIconByID(itemId)
@@ -169,7 +198,6 @@ local function handleItemFromTooltip(tooltip)
   end
 end
 
--- Spells: from tooltip itself
 local function handleSpellFromTooltip(tooltip)
   if not Enabled() then return end
   if not tooltip or not tooltip.GetSpell then return end
@@ -177,7 +205,6 @@ local function handleSpellFromTooltip(tooltip)
   local _, spellId = tooltip:GetSpell()
   if not spellId then return end
 
-  -- Order matters: SpellID first, then IconID below it
   TED.Modules.SpellID(tooltip, spellId)
 
   local iconId = GetSpellTexture and GetSpellTexture(spellId)
@@ -186,7 +213,6 @@ local function handleSpellFromTooltip(tooltip)
   end
 end
 
--- Hyperlinks (ItemRefTooltip + GameTooltip SetHyperlink)
 local function onSetHyperlink(tooltip, link)
   if not Enabled() then return end
   if not link then return end
@@ -197,16 +223,23 @@ local function onSetHyperlink(tooltip, link)
 
   if kind == "item" then
     TED.Modules.ItemID(tooltip, id)
+
     local iconId = GetItemIconByID and GetItemIconByID(id)
-    if iconId then TED.Modules.IconID(tooltip, iconId) end
+    if iconId then
+      TED.Modules.IconID(tooltip, iconId)
+    end
+
   elseif kind == "spell" then
     TED.Modules.SpellID(tooltip, id)
+
     local iconId = GetSpellTexture and GetSpellTexture(id)
-    if iconId then TED.Modules.IconID(tooltip, iconId) end
+    if iconId then
+      TED.Modules.IconID(tooltip, iconId)
+    end
   end
 end
 
--- Bags: real stack count
+-- Bags
 local function hookBags()
   if not (C_Container and C_Container.GetContainerItemInfo and C_Container.GetContainerItemID) then return end
 
@@ -218,17 +251,19 @@ local function hookBags()
 
     local info = C_Container.GetContainerItemInfo(bag, slot)
     local current = info and (info.stackCount or info.quantity)
-    if not current then return end
+    if current == nil then return end
 
     TED.Modules.Stack(tooltip, itemId, current)
     TED.Modules.ItemID(tooltip, itemId)
 
     local iconId = GetItemIconByID and GetItemIconByID(itemId)
-    if iconId then TED.Modules.IconID(tooltip, iconId) end
+    if iconId then
+      TED.Modules.IconID(tooltip, iconId)
+    end
   end)
 end
 
--- Loot: quantities
+-- Loot
 local function hookLoot()
   if GetLootSlotLink and GetLootSlotInfo then
     hooksecurefunc(GameTooltip, "SetLootItem", function(tooltip, slot)
@@ -239,12 +274,15 @@ local function hookLoot()
 
       local itemId = tonumber(link:match("item:(%d+)"))
       local qty = select(3, GetLootSlotInfo(slot))
-      if itemId and qty then
+
+      if itemId and qty ~= nil then
         TED.Modules.Stack(tooltip, itemId, qty)
         TED.Modules.ItemID(tooltip, itemId)
 
         local iconId = GetItemIconByID and GetItemIconByID(itemId)
-        if iconId then TED.Modules.IconID(tooltip, iconId) end
+        if iconId then
+          TED.Modules.IconID(tooltip, iconId)
+        end
       end
     end)
   end
@@ -258,18 +296,21 @@ local function hookLoot()
 
       local itemId = tonumber(link:match("item:(%d+)"))
       local qty = select(3, GetLootRollItemInfo(rollID))
-      if itemId and qty then
+
+      if itemId and qty ~= nil then
         TED.Modules.Stack(tooltip, itemId, qty)
         TED.Modules.ItemID(tooltip, itemId)
 
         local iconId = GetItemIconByID and GetItemIconByID(itemId)
-        if iconId then TED.Modules.IconID(tooltip, iconId) end
+        if iconId then
+          TED.Modules.IconID(tooltip, iconId)
+        end
       end
     end)
   end
 end
 
--- Action bars: show stack for usable items placed on action buttons
+-- Action bars
 local function hookActions()
   if not GetActionInfo then return end
 
@@ -283,15 +324,19 @@ local function hookActions()
     local itemId = tonumber(id)
     if not itemId then return end
 
-    -- Count shown on the action button (usually total in bags)
-    local count = (GetActionCount and GetActionCount(slot)) or (GetItemCount and GetItemCount(itemId)) or nil
-    if not count or count <= 0 then return end
+    local count = GetActionCount and GetActionCount(slot)
+    if count == nil and GetItemCount then
+      count = GetItemCount(itemId)
+    end
+    if count == nil then return end
 
     TED.Modules.Stack(tooltip, itemId, count)
     TED.Modules.ItemID(tooltip, itemId)
 
     local iconId = GetItemIconByID and GetItemIconByID(itemId)
-    if iconId then TED.Modules.IconID(tooltip, iconId) end
+    if iconId then
+      TED.Modules.IconID(tooltip, iconId)
+    end
   end)
 end
 
@@ -304,12 +349,13 @@ f:RegisterEvent("PLAYER_LOGIN")
 
 f:SetScript("OnEvent", function(_, event, arg1)
   if event == "ADDON_LOADED" and arg1 == addonName then
-    if type(TooltipExtraDataDB) ~= "table" then TooltipExtraDataDB = {} end
+    if type(TooltipExtraDataDB) ~= "table" then
+      TooltipExtraDataDB = {}
+    end
     CopyDefaults(TooltipExtraDataDB, defaults)
   end
 
   if event == "PLAYER_LOGIN" then
-    -- Prefer Retail approach: TooltipDataProcessor
     if TooltipDataProcessor and TooltipDataProcessor.AddTooltipPostCall and Enum and Enum.TooltipDataType then
       TooltipDataProcessor.AddTooltipPostCall(Enum.TooltipDataType.Item, function(tooltip, data)
         if not Enabled() then return end
@@ -321,13 +367,6 @@ f:SetScript("OnEvent", function(_, event, arg1)
         handleSpellFromTooltip(tooltip)
       end)
     else
-      -- Fallback: only hook scripts if they exist
-      local function SafeHookScript(frame, scriptName, fn)
-        if frame and frame.HasScript and frame:HasScript(scriptName) then
-          frame:HookScript(scriptName, fn)
-        end
-      end
-
       SafeHookScript(GameTooltip, "OnTooltipSetItem", handleItemFromTooltip)
       SafeHookScript(GameTooltip, "OnTooltipSetSpell", handleSpellFromTooltip)
 
@@ -338,15 +377,28 @@ f:SetScript("OnEvent", function(_, event, arg1)
     hooksecurefunc(GameTooltip, "SetHyperlink", onSetHyperlink)
     hooksecurefunc(ItemRefTooltip, "SetHyperlink", onSetHyperlink)
 
-    -- Stack-aware sources
     hookBags()
     hookLoot()
-	hookActions()
+    hookActions()
+
+    SafeHookScript(GameTooltip, "OnTooltipCleared", function(self)
+      clearTooltipState(self)
+    end)
+    SafeHookScript(GameTooltip, "OnHide", function(self)
+      clearTooltipState(self)
+    end)
+
+    SafeHookScript(ItemRefTooltip, "OnTooltipCleared", function(self)
+      clearTooltipState(self)
+    end)
+    SafeHookScript(ItemRefTooltip, "OnHide", function(self)
+      clearTooltipState(self)
+    end)
   end
 end)
 
 -- =========================
--- Slash command (tiny)
+-- Slash command
 -- =========================
 SLASH_TOOLTIPEXTRADATA1 = "/ted"
 SlashCmdList.TOOLTIPEXTRADATA = function(msg)
@@ -355,21 +407,27 @@ SlashCmdList.TOOLTIPEXTRADATA = function(msg)
   if msg == "on" then
     TooltipExtraDataDB.enabled = true
     print("TooltipExtraData: enabled")
+
   elseif msg == "off" then
     TooltipExtraDataDB.enabled = false
     print("TooltipExtraData: disabled")
+
   elseif msg == "stack" then
     TooltipExtraDataDB.modules.stack = not TooltipExtraDataDB.modules.stack
     print("TooltipExtraData: stack = " .. tostring(TooltipExtraDataDB.modules.stack))
+
   elseif msg == "itemid" then
     TooltipExtraDataDB.modules.itemid = not TooltipExtraDataDB.modules.itemid
     print("TooltipExtraData: itemid = " .. tostring(TooltipExtraDataDB.modules.itemid))
+
   elseif msg == "spellid" then
     TooltipExtraDataDB.modules.spellid = not TooltipExtraDataDB.modules.spellid
     print("TooltipExtraData: spellid = " .. tostring(TooltipExtraDataDB.modules.spellid))
+
   elseif msg == "iconid" then
     TooltipExtraDataDB.modules.iconid = not TooltipExtraDataDB.modules.iconid
     print("TooltipExtraData: iconid = " .. tostring(TooltipExtraDataDB.modules.iconid))
+
   else
     print("TooltipExtraData commands:")
     print("/ted on | off")
@@ -378,7 +436,7 @@ SlashCmdList.TOOLTIPEXTRADATA = function(msg)
 end
 
 -- =========================
--- Options panel (Settings/AddOns) + checkboxes
+-- Options panel
 -- =========================
 local panel = CreateFrame("Frame")
 panel.name = "TooltipExtraData"
@@ -386,7 +444,9 @@ panel.name = "TooltipExtraData"
 local function CreateCheck(parent, label, tooltipText, getter, setter)
   local cb = CreateFrame("CheckButton", nil, parent, "ChatConfigCheckButtonTemplate")
   cb.Text:SetText(label)
-  if tooltipText then cb.tooltip = tooltipText end
+  if tooltipText then
+    cb.tooltip = tooltipText
+  end
 
   function cb:Refresh()
     local ok, val = pcall(getter)
@@ -407,13 +467,16 @@ local function CreateCheck(parent, label, tooltipText, getter, setter)
 end
 
 panel:SetScript("OnShow", function(self)
-  -- Ensure DB is initialized even if panel is opened very early
-  if type(TooltipExtraDataDB) ~= "table" then TooltipExtraDataDB = {} end
+  if type(TooltipExtraDataDB) ~= "table" then
+    TooltipExtraDataDB = {}
+  end
   CopyDefaults(TooltipExtraDataDB, defaults)
 
   if self._init then
     for _, c in ipairs(self._checks or {}) do
-      if c and c.Refresh then c:Refresh() end
+      if c and c.Refresh then
+        c:Refresh()
+      end
     end
     return
   end
@@ -442,7 +505,7 @@ panel:SetScript("OnShow", function(self)
   local stackCB = CreateCheck(
     self,
     "Show Stack (current/max)",
-    "Shows stack count on the right side of the item name (bags/loot only).",
+    "Shows stack count on the right side of the item name.",
     function() return TooltipExtraDataDB.modules.stack end,
     function(v) TooltipExtraDataDB.modules.stack = v end
   )
@@ -481,7 +544,7 @@ panel:SetScript("OnShow", function(self)
 
   local hint = self:CreateFontString(nil, "ARTWORK", "GameFontDisableSmall")
   hint:SetPoint("TOPLEFT", iconIdCB, "BOTTOMLEFT", 2, -14)
-  hint:SetText("Tip: Use /ted for quick toggles. /reload if you want to instantly refresh some tooltips.")
+  hint:SetText("Tip: Use /ted for quick toggles. /reload refreshes existing tooltips.")
 end)
 
 if InterfaceOptions_AddCategory then
