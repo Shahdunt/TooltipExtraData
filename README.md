@@ -1,4 +1,5 @@
-TooltipExtraData is a simple addon that adds extra data to tooltip
+TooltipExtraData is a simple addon that adds extra data to tooltip.
+Available from [Curseforge](https://www.curseforge.com/wow/addons/tooltipextradata)
 
 # Highlights
 

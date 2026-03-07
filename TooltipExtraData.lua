@@ -10,7 +10,7 @@ local defaults = {
   colorGray = "808080",
 
   modules = {
-    stack  = true,  -- current/max stack
+    stack  = true,  -- current/max stack, or owned/max in AH/Auctionator
     itemid = true,  -- ItemID on item tooltips
     spellid = true, -- SpellID on spell tooltips
     iconid = true,  -- IconID (texture FileID) below ItemID/SpellID
@@ -96,6 +96,97 @@ local function SafeHookScript(frame, scriptName, fn)
   end
 end
 
+local function GetItemIDFromLink(link)
+  if not link then return nil end
+  return tonumber(link:match("item:(%d+)"))
+end
+
+local function GetItemIDFromItemKey(...)
+  local a1, a2 = ...
+  if type(a1) == "table" then
+    return tonumber(a1.itemID or a1.itemId or a1.id)
+  end
+  if type(a1) == "number" then
+    return tonumber(a1)
+  end
+  if type(a2) == "number" then
+    return tonumber(a2)
+  end
+  return nil
+end
+
+local function NormalizeCount(count)
+  if count == nil then
+    return nil
+  end
+
+  local ok, n = pcall(function()
+    return tonumber(count)
+  end)
+
+  if ok and n ~= nil then
+    return n
+  end
+
+  return nil
+end
+
+local function ExtractCountFromTooltipData(data)
+  if type(data) ~= "table" then return nil end
+
+  local count = data.stackCount
+    or data.quantity
+    or data.count
+    or data.itemCount
+    or data.stackSize
+    or data.charges
+
+  return NormalizeCount(count)
+end
+
+local function ExtractItemIDFromAny(data)
+  if type(data) ~= "table" then return nil end
+
+  return tonumber(
+    data.itemID
+    or data.itemId
+    or data.id
+    or (type(data.itemKey) == "table" and (data.itemKey.itemID or data.itemKey.itemId))
+    or (type(data.itemKeyInfo) == "table" and (data.itemKeyInfo.itemID or data.itemKeyInfo.itemId))
+    or (type(data.auctionInfo) == "table" and (data.auctionInfo.itemID or data.auctionInfo.itemId))
+  )
+end
+
+local function ExtractCountFromAny(data)
+  if type(data) ~= "table" then return nil end
+
+  return NormalizeCount(
+    data.quantity
+    or data.stackCount
+    or data.count
+    or data.itemCount
+    or data.stackSize
+  )
+end
+
+local function GetOwnedItemCount(itemId)
+  if not itemId or not GetItemCount then
+    return 0
+  end
+
+  local ok, count = pcall(GetItemCount, itemId)
+  if not ok or count == nil then
+    return 0
+  end
+
+  local normalized = NormalizeCount(count)
+  if normalized == nil then
+    return 0
+  end
+
+  return normalized
+end
+
 -- =========================
 -- API wrappers
 -- =========================
@@ -115,11 +206,14 @@ function TED.Modules.Stack(tooltip, itemId, currentCount)
   if not tooltip or not itemId or currentCount == nil then return end
 
   local itemIdNum = tonumber(itemId)
-  local currentNum = tonumber(currentCount)
-  if not itemIdNum or not currentNum then return end
+  local currentNum = NormalizeCount(currentCount)
+  if not itemIdNum or currentNum == nil then return end
 
   local maxStack = GetItemMaxStackSizeByID(itemIdNum)
-  if not maxStack or maxStack <= 1 then return end
+  if not maxStack then return end
+
+  local maxNum = NormalizeCount(maxStack)
+  if maxNum == nil or maxNum <= 1 then return end
 
   local name = getTooltipName(tooltip)
   if not name then return end
@@ -127,14 +221,14 @@ function TED.Modules.Stack(tooltip, itemId, currentCount)
   local right1 = _G[name .. "TextRight1"]
   if not right1 then return end
 
-  local stackKey = tostring(currentNum) .. "/" .. tostring(maxStack)
-  if wasAdded(tooltip, "stack", stackKey) then return end
+  local displayText = tostring(currentNum) .. "/" .. tostring(maxNum)
+  if wasAdded(tooltip, "stack", displayText) then return end
 
-  right1:SetText(Gray(stackKey))
+  right1:SetText(Gray(displayText))
   right1:Show()
   tooltip:Show()
 
-  markAdded(tooltip, "stack", stackKey)
+  markAdded(tooltip, "stack", displayText)
 end
 
 -- ---- ItemID module
@@ -177,24 +271,434 @@ function TED.Modules.IconID(tooltip, iconId)
 end
 
 -- =========================
--- Data extraction / hooks
+-- Common item/spell appliers
 -- =========================
-
-local function handleItemFromTooltip(tooltip)
+local function ApplyItemModules(tooltip, itemId, count)
   if not Enabled() then return end
-  if not tooltip or not tooltip.GetItem then return end
+  if not tooltip or not itemId then return end
 
-  local _, link = tooltip:GetItem()
-  if not link then return end
-
-  local itemId = tonumber(link:match("item:(%d+)"))
+  itemId = tonumber(itemId)
   if not itemId then return end
+
+  if count ~= nil then
+    count = NormalizeCount(count)
+    if count ~= nil then
+      TED.Modules.Stack(tooltip, itemId, count)
+    end
+  end
 
   TED.Modules.ItemID(tooltip, itemId)
 
   local iconId = GetItemIconByID and GetItemIconByID(itemId)
   if iconId then
     TED.Modules.IconID(tooltip, iconId)
+  end
+end
+
+local function ApplySpellModules(tooltip, spellId)
+  if not Enabled() then return end
+  if not tooltip or not spellId then return end
+
+  spellId = tonumber(spellId)
+  if not spellId then return end
+
+  TED.Modules.SpellID(tooltip, spellId)
+
+  local iconId = GetSpellTexture and GetSpellTexture(spellId)
+  if iconId then
+    TED.Modules.IconID(tooltip, iconId)
+  end
+end
+
+local function ApplyAHOwnedStack(tooltip, itemId)
+  if not Enabled() then return end
+  if not ModuleOn("stack") then return end
+  if not tooltip or not itemId then return end
+
+  itemId = tonumber(itemId)
+  if not itemId then return end
+
+  local ownedCount = GetOwnedItemCount(itemId)
+  ApplyItemModules(tooltip, itemId, ownedCount)
+end
+
+-- =========================
+-- Generic frame/data scanning
+-- =========================
+local function FindCountInFrameChain(frame, maxDepth)
+  local depth = 0
+  local current = frame
+  maxDepth = maxDepth or 8
+
+  while current and depth < maxDepth do
+    local directCount = NormalizeCount(
+      current.quantity
+      or current.stackCount
+      or current.count
+      or current.itemCount
+    )
+    if directCount ~= nil then
+      return directCount
+    end
+
+    if current.GetElementData then
+      local ok, data = pcall(current.GetElementData, current)
+      if ok and type(data) == "table" then
+        local count = NormalizeCount(
+          data.quantity
+          or data.stackCount
+          or data.count
+          or data.itemCount
+        )
+        if count ~= nil then
+          return count
+        end
+
+        if type(data.itemKeyInfo) == "table" then
+          count = NormalizeCount(
+            data.itemKeyInfo.quantity
+            or data.itemKeyInfo.stackCount
+            or data.itemKeyInfo.count
+            or data.itemKeyInfo.itemCount
+          )
+          if count ~= nil then
+            return count
+          end
+        end
+
+        if type(data.auctionInfo) == "table" then
+          count = NormalizeCount(
+            data.auctionInfo.quantity
+            or data.auctionInfo.stackCount
+            or data.auctionInfo.count
+            or data.auctionInfo.itemCount
+          )
+          if count ~= nil then
+            return count
+          end
+        end
+      end
+    end
+
+    current = current.GetParent and current:GetParent() or nil
+    depth = depth + 1
+  end
+
+  return nil
+end
+
+local function IsAuctionatorFrame(frame)
+  local depth = 0
+  local current = frame
+
+  while current and depth < 12 do
+    local name = current.GetName and current:GetName()
+    if type(name) == "string" and name:find("Auctionator", 1, true) then
+      return true
+    end
+
+    if current.AuctionatorSellingFrame
+      or current.AuctionatorShoppingFrame
+      or current.AuctionatorCancellingFrame
+      or current.AuctionatorTabMixin
+      or current.Search
+      or current.ResultsListing
+      or current.BuyDisplay
+    then
+      return true
+    end
+
+    current = current.GetParent and current:GetParent() or nil
+    depth = depth + 1
+  end
+
+  return false
+end
+
+local function ReadAuctionatorDataObject(data, wantedItemID, depth)
+  if type(data) ~= "table" then return nil end
+  depth = depth or 0
+  if depth > 5 then return nil end
+
+  local foundItemID = ExtractItemIDFromAny(data)
+  local foundCount = ExtractCountFromAny(data)
+
+  if foundCount ~= nil then
+    if wantedItemID == nil or foundItemID == nil or foundItemID == wantedItemID then
+      return foundCount
+    end
+  end
+
+  local keys = {
+    "data",
+    "itemKey",
+    "itemKeyInfo",
+    "auctionInfo",
+    "selectedData",
+    "selectedRowData",
+    "selectedResult",
+    "selectedListing",
+    "selectedItem",
+    "selectedEntry",
+    "rowData",
+    "result",
+    "listing",
+    "searchResult",
+    "currentRowData",
+    "elementData",
+    "searchData",
+    "purchaseData",
+    "buyData",
+    "resultsData",
+  }
+
+  for _, key in ipairs(keys) do
+    local sub = data[key]
+    if type(sub) == "table" then
+      local count = ReadAuctionatorDataObject(sub, wantedItemID, depth + 1)
+      if count ~= nil then
+        return count
+      end
+    end
+  end
+
+  return nil
+end
+
+local function ReadAuctionatorObject(obj, wantedItemID)
+  if type(obj) ~= "table" then return nil end
+
+  local count = ReadAuctionatorDataObject(obj, wantedItemID, 0)
+  if count ~= nil then
+    return count
+  end
+
+  local methods = {
+    "GetElementData",
+    "GetData",
+    "GetSelectedData",
+    "GetSelectedResult",
+    "GetSelectedRowData",
+    "GetResult",
+    "GetListingData",
+  }
+
+  for _, methodName in ipairs(methods) do
+    local method = obj[methodName]
+    if type(method) == "function" then
+      local ok, result = pcall(method, obj)
+      if ok and type(result) == "table" then
+        count = ReadAuctionatorDataObject(result, wantedItemID, 0)
+        if count ~= nil then
+          return count
+        end
+      end
+    end
+  end
+
+  return nil
+end
+
+-- =========================
+-- Owner/context-based stack detection
+-- =========================
+local function GetOwnerItemID(tooltip)
+  if not tooltip or not tooltip.GetItem then return nil end
+  local _, link = tooltip:GetItem()
+  return GetItemIDFromLink(link)
+end
+
+local function GetMerchantStackFromOwner(tooltip)
+  local owner = tooltip and tooltip:GetOwner()
+  if not owner then return nil end
+
+  local name = owner.GetName and owner:GetName()
+  local id = owner.GetID and owner:GetID()
+
+  if id and name and name:match("^MerchantItem%d+$") and GetMerchantItemInfo then
+    local _, _, _, quantity = GetMerchantItemInfo(id)
+    return NormalizeCount(quantity)
+  end
+
+  if owner.index and GetMerchantItemInfo then
+    local _, _, _, quantity = GetMerchantItemInfo(owner.index)
+    return NormalizeCount(quantity)
+  end
+
+  return nil
+end
+
+local function IsAHLikeOwner(tooltip)
+  local owner = tooltip and tooltip:GetOwner()
+  if not owner then return false end
+
+  local current = owner
+  local depth = 0
+
+  while current and depth < 12 do
+    local name = current.GetName and current:GetName()
+    if type(name) == "string" then
+      if name:find("Auctionator", 1, true)
+        or name:find("AuctionHouse", 1, true)
+        or name:find("BrowseResults", 1, true)
+        or name:find("Commodities", 1, true)
+        or name:find("ItemBuyFrame", 1, true)
+      then
+        return true
+      end
+    end
+
+    if IsAuctionatorFrame(current) then
+      return true
+    end
+
+    current = current.GetParent and current:GetParent() or nil
+    depth = depth + 1
+  end
+
+  return false
+end
+
+local function GetAuctionStackFromOwner(tooltip)
+  local owner = tooltip and tooltip:GetOwner()
+  if not owner then return nil end
+
+  local itemId = GetOwnerItemID(tooltip)
+  if not itemId then return nil end
+
+  local count = FindCountInFrameChain(owner, 8)
+  if count ~= nil then
+    return GetOwnedItemCount(itemId)
+  end
+
+  return GetOwnedItemCount(itemId)
+end
+
+local function GetAuctionatorShoppingStack(tooltip)
+  local owner = tooltip and tooltip:GetOwner()
+  if not owner then return nil end
+
+  local wantedItemID = GetOwnerItemID(tooltip)
+  if not wantedItemID then return nil end
+
+  local current = owner
+  local depth = 0
+
+  while current and depth < 12 do
+    if IsAuctionatorFrame(current) then
+      local count = ReadAuctionatorObject(current, wantedItemID)
+      if count ~= nil then
+        return GetOwnedItemCount(wantedItemID)
+      end
+    end
+
+    current = current.GetParent and current:GetParent() or nil
+    depth = depth + 1
+  end
+
+  local globalsToCheck = {
+    "AuctionatorShoppingFrame",
+    "AuctionatorShoppingTabFrame",
+    "AuctionatorShoppingResultsListing",
+    "AuctionatorShoppingResults",
+    "AuctionatorResultsListing",
+    "AuctionatorBuyCommodityFrame",
+    "AuctionatorBuyItemFrame",
+    "AuctionHouseFrame",
+  }
+
+  for _, globalName in ipairs(globalsToCheck) do
+    local obj = rawget(_G, globalName)
+    if type(obj) == "table" then
+      local count = ReadAuctionatorObject(obj, wantedItemID)
+      if count ~= nil then
+        return GetOwnedItemCount(wantedItemID)
+      end
+    end
+  end
+
+  return GetOwnedItemCount(wantedItemID)
+end
+
+local function GetAuctionatorStackFromOwner(tooltip)
+  local owner = tooltip and tooltip:GetOwner()
+  if not owner then return nil end
+
+  local itemId = GetOwnerItemID(tooltip)
+  if not itemId then return nil end
+
+  if not IsAuctionatorFrame(owner) then
+    return GetAuctionatorShoppingStack(tooltip)
+  end
+
+  local count = FindCountInFrameChain(owner, 12)
+  if count ~= nil then
+    return GetOwnedItemCount(itemId)
+  end
+
+  count = ReadAuctionatorObject(owner, itemId)
+  if count ~= nil then
+    return GetOwnedItemCount(itemId)
+  end
+
+  return GetAuctionatorShoppingStack(tooltip)
+end
+
+local function ApplyContextStackFromOwner(tooltip)
+  if not Enabled() then return end
+  if not ModuleOn("stack") then return end
+  if not tooltip then return end
+
+  local itemId = GetOwnerItemID(tooltip)
+  if not itemId then return end
+
+  local merchantCount = GetMerchantStackFromOwner(tooltip)
+  if merchantCount ~= nil then
+    ApplyItemModules(tooltip, itemId, merchantCount)
+    return
+  end
+
+  if IsAHLikeOwner(tooltip) then
+    ApplyAHOwnedStack(tooltip, itemId)
+    return
+  end
+
+  local auctionatorCount = GetAuctionatorStackFromOwner(tooltip)
+  if auctionatorCount ~= nil then
+    ApplyItemModules(tooltip, itemId, auctionatorCount)
+    return
+  end
+
+  local auctionCount = GetAuctionStackFromOwner(tooltip)
+  if auctionCount ~= nil then
+    ApplyItemModules(tooltip, itemId, auctionCount)
+    return
+  end
+end
+
+-- =========================
+-- Data extraction / hooks
+-- =========================
+local function handleItemFromTooltip(tooltip, data)
+  if not Enabled() then return end
+  if not tooltip or not tooltip.GetItem then return end
+
+  local _, link = tooltip:GetItem()
+  if not link then return end
+
+  local itemId = GetItemIDFromLink(link)
+  if not itemId then return end
+
+  if IsAHLikeOwner(tooltip) then
+    ApplyAHOwnedStack(tooltip, itemId)
+    return
+  end
+
+  local count = ExtractCountFromTooltipData(data)
+  ApplyItemModules(tooltip, itemId, count)
+
+  if count == nil then
+    ApplyContextStackFromOwner(tooltip)
   end
 end
 
@@ -205,12 +709,7 @@ local function handleSpellFromTooltip(tooltip)
   local _, spellId = tooltip:GetSpell()
   if not spellId then return end
 
-  TED.Modules.SpellID(tooltip, spellId)
-
-  local iconId = GetSpellTexture and GetSpellTexture(spellId)
-  if iconId then
-    TED.Modules.IconID(tooltip, iconId)
-  end
+  ApplySpellModules(tooltip, spellId)
 end
 
 local function onSetHyperlink(tooltip, link)
@@ -222,21 +721,24 @@ local function onSetHyperlink(tooltip, link)
   if not id then return end
 
   if kind == "item" then
-    TED.Modules.ItemID(tooltip, id)
-
-    local iconId = GetItemIconByID and GetItemIconByID(id)
-    if iconId then
-      TED.Modules.IconID(tooltip, iconId)
+    if IsAHLikeOwner(tooltip) then
+      ApplyAHOwnedStack(tooltip, id)
+    else
+      ApplyItemModules(tooltip, id, nil)
     end
-
   elseif kind == "spell" then
-    TED.Modules.SpellID(tooltip, id)
-
-    local iconId = GetSpellTexture and GetSpellTexture(id)
-    if iconId then
-      TED.Modules.IconID(tooltip, iconId)
-    end
+    ApplySpellModules(tooltip, id)
   end
+end
+
+local function onSetItemKey(tooltip, ...)
+  if not Enabled() then return end
+
+  local itemId = GetItemIDFromItemKey(...)
+  if not itemId then return end
+
+  ApplyAHOwnedStack(tooltip, itemId)
+  ApplyContextStackFromOwner(tooltip)
 end
 
 -- Bags
@@ -251,15 +753,7 @@ local function hookBags()
 
     local info = C_Container.GetContainerItemInfo(bag, slot)
     local current = info and (info.stackCount or info.quantity)
-    if current == nil then return end
-
-    TED.Modules.Stack(tooltip, itemId, current)
-    TED.Modules.ItemID(tooltip, itemId)
-
-    local iconId = GetItemIconByID and GetItemIconByID(itemId)
-    if iconId then
-      TED.Modules.IconID(tooltip, iconId)
-    end
+    ApplyItemModules(tooltip, itemId, current)
   end)
 end
 
@@ -272,17 +766,11 @@ local function hookLoot()
       local link = GetLootSlotLink(slot)
       if not link then return end
 
-      local itemId = tonumber(link:match("item:(%d+)"))
+      local itemId = GetItemIDFromLink(link)
       local qty = select(3, GetLootSlotInfo(slot))
 
-      if itemId and qty ~= nil then
-        TED.Modules.Stack(tooltip, itemId, qty)
-        TED.Modules.ItemID(tooltip, itemId)
-
-        local iconId = GetItemIconByID and GetItemIconByID(itemId)
-        if iconId then
-          TED.Modules.IconID(tooltip, iconId)
-        end
+      if itemId then
+        ApplyItemModules(tooltip, itemId, qty)
       end
     end)
   end
@@ -294,17 +782,11 @@ local function hookLoot()
       local link = GetLootRollItemLink(rollID)
       if not link then return end
 
-      local itemId = tonumber(link:match("item:(%d+)"))
+      local itemId = GetItemIDFromLink(link)
       local qty = select(3, GetLootRollItemInfo(rollID))
 
-      if itemId and qty ~= nil then
-        TED.Modules.Stack(tooltip, itemId, qty)
-        TED.Modules.ItemID(tooltip, itemId)
-
-        local iconId = GetItemIconByID and GetItemIconByID(itemId)
-        if iconId then
-          TED.Modules.IconID(tooltip, iconId)
-        end
+      if itemId then
+        ApplyItemModules(tooltip, itemId, qty)
       end
     end)
   end
@@ -328,16 +810,61 @@ local function hookActions()
     if count == nil and GetItemCount then
       count = GetItemCount(itemId)
     end
-    if count == nil then return end
 
-    TED.Modules.Stack(tooltip, itemId, count)
-    TED.Modules.ItemID(tooltip, itemId)
-
-    local iconId = GetItemIconByID and GetItemIconByID(itemId)
-    if iconId then
-      TED.Modules.IconID(tooltip, iconId)
-    end
+    ApplyItemModules(tooltip, itemId, count)
   end)
+end
+
+-- Merchants / vendors
+local function hookMerchants()
+  if GetMerchantItemLink and GetMerchantItemInfo then
+    hooksecurefunc(GameTooltip, "SetMerchantItem", function(tooltip, index)
+      if not Enabled() then return end
+      if not index then return end
+
+      local link = GetMerchantItemLink(index)
+      if not link then return end
+
+      local itemId = GetItemIDFromLink(link)
+      if not itemId then return end
+
+      local _, _, _, quantity = GetMerchantItemInfo(index)
+      ApplyItemModules(tooltip, itemId, quantity)
+    end)
+  end
+end
+
+-- Auction House
+local function hookAuctionHouse()
+  if GameTooltip and GameTooltip.SetAuctionItem and GetAuctionItemLink and GetAuctionItemInfo then
+    hooksecurefunc(GameTooltip, "SetAuctionItem", function(tooltip, list, index)
+      if not Enabled() then return end
+      if not list or not index then return end
+
+      local link = GetAuctionItemLink(list, index)
+      if not link then return end
+
+      local itemId = GetItemIDFromLink(link)
+      if not itemId then return end
+
+      ApplyAHOwnedStack(tooltip, itemId)
+    end)
+  end
+end
+
+-- Auctionator / SetItemKey paths
+local function hookItemKeyTooltips()
+  if GameTooltip and GameTooltip.SetItemKey then
+    hooksecurefunc(GameTooltip, "SetItemKey", function(tooltip, ...)
+      onSetItemKey(tooltip, ...)
+    end)
+  end
+
+  if ItemRefTooltip and ItemRefTooltip.SetItemKey then
+    hooksecurefunc(ItemRefTooltip, "SetItemKey", function(tooltip, ...)
+      onSetItemKey(tooltip, ...)
+    end)
+  end
 end
 
 -- =========================
@@ -359,18 +886,22 @@ f:SetScript("OnEvent", function(_, event, arg1)
     if TooltipDataProcessor and TooltipDataProcessor.AddTooltipPostCall and Enum and Enum.TooltipDataType then
       TooltipDataProcessor.AddTooltipPostCall(Enum.TooltipDataType.Item, function(tooltip, data)
         if not Enabled() then return end
-        handleItemFromTooltip(tooltip)
+        handleItemFromTooltip(tooltip, data)
       end)
 
       TooltipDataProcessor.AddTooltipPostCall(Enum.TooltipDataType.Spell, function(tooltip, data)
         if not Enabled() then return end
-        handleSpellFromTooltip(tooltip)
+        handleSpellFromTooltip(tooltip, data)
       end)
     else
-      SafeHookScript(GameTooltip, "OnTooltipSetItem", handleItemFromTooltip)
+      SafeHookScript(GameTooltip, "OnTooltipSetItem", function(self)
+        handleItemFromTooltip(self, nil)
+      end)
       SafeHookScript(GameTooltip, "OnTooltipSetSpell", handleSpellFromTooltip)
 
-      SafeHookScript(ItemRefTooltip, "OnTooltipSetItem", handleItemFromTooltip)
+      SafeHookScript(ItemRefTooltip, "OnTooltipSetItem", function(self)
+        handleItemFromTooltip(self, nil)
+      end)
       SafeHookScript(ItemRefTooltip, "OnTooltipSetSpell", handleSpellFromTooltip)
     end
 
@@ -380,6 +911,17 @@ f:SetScript("OnEvent", function(_, event, arg1)
     hookBags()
     hookLoot()
     hookActions()
+    hookMerchants()
+    hookAuctionHouse()
+    hookItemKeyTooltips()
+
+    SafeHookScript(GameTooltip, "OnTooltipSetItem", function(self)
+      ApplyContextStackFromOwner(self)
+    end)
+
+    SafeHookScript(ItemRefTooltip, "OnTooltipSetItem", function(self)
+      ApplyContextStackFromOwner(self)
+    end)
 
     SafeHookScript(GameTooltip, "OnTooltipCleared", function(self)
       clearTooltipState(self)
@@ -504,8 +1046,8 @@ panel:SetScript("OnShow", function(self)
 
   local stackCB = CreateCheck(
     self,
-    "Show Stack (current/max)",
-    "Shows stack count on the right side of the item name.",
+    "Show Stack",
+    "Shows current/max normally, and owned/max in AH/Auctionator.",
     function() return TooltipExtraDataDB.modules.stack end,
     function(v) TooltipExtraDataDB.modules.stack = v end
   )
