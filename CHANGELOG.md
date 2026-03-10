@@ -5,16 +5,10 @@ Todos los cambios importantes de este proyecto se documentarán en este archivo.
 El formato está basado en Keep a Changelog
 y este proyecto sigue Semantic Versioning.
 
-## [Unreleased]
+## [1.3.0] - 2026-03-10
 
 ### Added
-- Opción para mostrar/ocultar IconID en el tooltip.
-
-### Changed
-- Ajustado el alineado visual de IconID bajo ItemID/SpellID.
-
-### Fixed
-- Corregido el Stack para items usables en action bars.
+- Item lvl del jugador
 
 ## [1.2.0] - 2026-03-07
 
@@ -25,6 +19,7 @@ y este proyecto sigue Semantic Versioning.
 ### Fixed
 - Evitado error de taint al leer datos del tooltip en ciertos contextos seguros.
 
+
 ## [1.1.1] - 2026-03-06
 
 ### Added
@@ -33,3 +28,15 @@ y este proyecto sigue Semantic Versioning.
 
 ### Changed
 - Mejoras en la presentación de IDs dentro del tooltip.
+
+
+## [Unreleased]
+
+### Added
+- Opción para mostrar/ocultar IconID en el tooltip.
+
+### Changed
+- Ajustado el alineado visual de IconID bajo ItemID/SpellID.
+
+### Fixed
+- Corregido el Stack para items usables en action bars.
