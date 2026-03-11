@@ -1,7 +1,7 @@
 ## Interface: 120001
 ## Title: TooltipExtraData
-## Version: 1.3.0
-## Notes: Adds extra data to tooltips (Stack current/max, ItemID, SpellID).
+## Version: 1.3.2
+## Notes: Adds extra data to tooltips (Stack current/max, ItemID, SpellID, Player Ilvl).
 ## Author: Shadhunt
 ## X-Curse-Project-ID: 1478491
 ## X-WoWI-ID: 134938

@@ -76,6 +76,42 @@ local function GetInspectDelay()
 end
 
 -- =========================
+-- Safe helpers
+-- =========================
+local function SafeCall(fn, ...)
+  if type(fn) ~= "function" then
+    return false
+  end
+  return pcall(fn, ...)
+end
+
+local function SafeCompare(a, b)
+  local ta, tb = type(a), type(b)
+  if ta ~= tb then
+    return false
+  end
+
+  if ta == "nil" then
+    return true
+  end
+
+  if ta == "number" or ta == "boolean" then
+    return a == b
+  end
+
+  -- Evita comparar strings tainted/secret strings directamente.
+  if ta == "string" then
+    return false
+  end
+
+  local ok, result = pcall(function()
+    return a == b
+  end)
+
+  return ok and result or false
+end
+
+-- =========================
 -- Tooltip state helpers
 -- =========================
 local function ensureTooltipState(tooltip)
@@ -87,19 +123,28 @@ end
 local function wasAdded(tooltip, key, value)
   local state = ensureTooltipState(tooltip)
   if not state then return false end
-  return state[key] == value
+
+  if value == nil then
+    return state[key] and true or false
+  end
+
+  return SafeCompare(state[key], value)
 end
 
 local function markAdded(tooltip, key, value)
   local state = ensureTooltipState(tooltip)
   if not state then return end
-  state[key] = value
+
+  if value == nil then
+    state[key] = true
+  else
+    state[key] = value
+  end
 end
 
 local function clearTooltipState(tooltip)
   if tooltip then
     tooltip.TED_State = nil
-    tooltip.TED_PlayerGUID = nil
     tooltip.TED_InspectPending = nil
   end
 end
@@ -113,7 +158,10 @@ end
 
 local function addDoubleLine(tooltip, leftText, rightText)
   if not tooltip or not tooltip.AddDoubleLine then return end
-  tooltip:AddDoubleLine(
+
+  local ok = SafeCall(
+    tooltip.AddDoubleLine,
+    tooltip,
     leftText,
     rightText,
     nil, nil, nil,
@@ -121,30 +169,25 @@ local function addDoubleLine(tooltip, leftText, rightText)
     WHITE_FONT_COLOR.g,
     WHITE_FONT_COLOR.b
   )
-  tooltip:Show()
+
+  if ok then
+    SafeCall(tooltip.Show, tooltip)
+  end
 end
 
 local function addSingleLine(tooltip, text, r, g, b)
   if not tooltip or not tooltip.AddLine or not text or text == "" then return end
-  tooltip:AddLine(text, r or 1, g or 1, b or 1, true)
-  tooltip:Show()
+
+  local ok = SafeCall(tooltip.AddLine, tooltip, text, r or 1, g or 1, b or 1, true)
+  if ok then
+    SafeCall(tooltip.Show, tooltip)
+  end
 end
 
 local function SafeHookScript(frame, scriptName, fn)
   if frame and frame.HasScript and frame:HasScript(scriptName) then
     frame:HookScript(scriptName, fn)
   end
-end
-
-local function GetTooltipUnit(tooltip)
-  if not tooltip or not tooltip.GetUnit then return nil end
-
-  local ok, _, unit = pcall(tooltip.GetUnit, tooltip)
-  if ok and unit then
-    return unit
-  end
-
-  return nil
 end
 
 local function GetUnitClassColor(unit)
@@ -272,6 +315,25 @@ local GetItemIconByID = (C_Item and C_Item.GetItemIconByID) and C_Item.GetItemIc
 local GetSpellTexture = (C_Spell and C_Spell.GetSpellTexture) and C_Spell.GetSpellTexture or GetSpellTexture
 
 -- =========================
+-- Safe unit resolution for inspect
+-- =========================
+local function ResolveInspectableUnit(tooltip)
+  if tooltip ~= GameTooltip then
+    return nil
+  end
+
+  local unit = "mouseover"
+
+  if not UnitExists(unit) then return nil end
+  if not UnitIsPlayer(unit) then return nil end
+  if UnitIsUnit and UnitIsUnit(unit, "player") then return nil end
+  if UnitIsConnected and not UnitIsConnected(unit) then return nil end
+  if CanInspect and not CanInspect(unit, true) then return nil end
+
+  return unit
+end
+
+-- =========================
 -- Inspect cache / queue
 -- =========================
 TED.InspectCache = TED.InspectCache or {}
@@ -279,7 +341,6 @@ TED.InspectQueue = TED.InspectQueue or {}
 
 local inspectFrame = CreateFrame("Frame")
 local inspectTickerActive = false
-local pendingInspectGUID = nil
 local pendingInspectUnit = nil
 local pendingInspectTooltip = nil
 
@@ -309,6 +370,7 @@ end
 local function QueueInspect(unit, tooltip)
   if not ModuleOn("playerinfo") then return end
   if not unit or not tooltip then return end
+  if type(unit) ~= "string" then return end
   if not UnitExists or not UnitExists(unit) then return end
   if not UnitIsPlayer or not UnitIsPlayer(unit) then return end
   if UnitIsUnit and UnitIsUnit(unit, "player") then return end
@@ -322,49 +384,46 @@ local function QueueInspect(unit, tooltip)
     return
   end
 
-  if tooltip.TED_InspectPending == guid then
+  if tooltip.TED_InspectPending then
     return
   end
 
   for i = 1, #TED.InspectQueue do
     local entry = TED.InspectQueue[i]
-    if entry and entry.guid == guid then
+    if entry and entry.tooltip == tooltip then
       return
     end
   end
 
-  tooltip.TED_InspectPending = guid
+  tooltip.TED_InspectPending = true
 
   table.insert(TED.InspectQueue, {
-    guid = guid,
     unit = unit,
     tooltip = tooltip,
   })
 end
 
 local function ProcessInspectQueue()
-  if pendingInspectGUID or pendingInspectUnit then
+  if pendingInspectUnit then
     return
   end
 
   while #TED.InspectQueue > 0 do
     local entry = table.remove(TED.InspectQueue, 1)
     if entry then
-      local unit = entry.unit
       local tooltip = entry.tooltip
-      local guid = entry.guid
+      local unit = ResolveInspectableUnit(tooltip)
 
-      if tooltip and tooltip:IsShown() and unit and UnitExists(unit) and UnitGUID(unit) == guid and UnitIsPlayer(unit) then
+      if tooltip and tooltip:IsShown() and unit and unit == entry.unit then
         if CanInspect and CanInspect(unit, true) then
-          pendingInspectGUID = guid
           pendingInspectUnit = unit
           pendingInspectTooltip = tooltip
-          NotifyInspect(unit)
+          SafeCall(NotifyInspect, unit)
           return
         end
       end
 
-      if tooltip and tooltip.TED_InspectPending == guid then
+      if tooltip then
         tooltip.TED_InspectPending = nil
       end
     end
@@ -416,8 +475,8 @@ function TED.Modules.Stack(tooltip, itemId, currentCount)
   local currentNum = NormalizeCount(currentCount)
   if not itemIdNum or currentNum == nil then return end
 
-  local maxStack = GetItemMaxStackSizeByID(itemIdNum)
-  if not maxStack then return end
+  local okMax, maxStack = pcall(GetItemMaxStackSizeByID, itemIdNum)
+  if not okMax or not maxStack then return end
 
   local maxNum = NormalizeCount(maxStack)
   if maxNum == nil or maxNum <= 1 then return end
@@ -426,16 +485,18 @@ function TED.Modules.Stack(tooltip, itemId, currentCount)
   if not name then return end
 
   local right1 = _G[name .. "TextRight1"]
-  if not right1 then return end
+  if not right1 or not right1.SetText then return end
+
+  if wasAdded(tooltip, "stack") then return end
 
   local displayText = tostring(currentNum) .. "/" .. tostring(maxNum)
-  if wasAdded(tooltip, "stack", displayText) then return end
 
-  right1:SetText(Gray(displayText))
-  right1:Show()
-  tooltip:Show()
-
-  markAdded(tooltip, "stack", displayText)
+  local ok = SafeCall(right1.SetText, right1, Gray(displayText))
+  if ok then
+    SafeCall(right1.Show, right1)
+    SafeCall(tooltip.Show, tooltip)
+    markAdded(tooltip, "stack")
+  end
 end
 
 -- ---- ItemID module
@@ -478,15 +539,14 @@ function TED.Modules.IconID(tooltip, iconId)
 end
 
 -- ---- PlayerInfo module
-function TED.Modules.PlayerInfo(tooltip, unit, specName, itemLevel, guid)
+function TED.Modules.PlayerInfo(tooltip, unit, specName, itemLevel)
   if not ModuleOn("playerinfo") then return end
-  if not tooltip or not guid then return end
+  if not tooltip or not unit then return end
 
   local ilevelText = FormatItemLevel(itemLevel)
   if not specName and not ilevelText then return end
 
-  local stateValue = tostring(specName or "?") .. "|" .. tostring(ilevelText or "?") .. "|" .. tostring(guid)
-  if wasAdded(tooltip, "playerinfo", stateValue) then return end
+  if wasAdded(tooltip, "playerinfo") then return end
 
   local r, g, b = GetUnitClassColor(unit)
   local coloredSpec = specName and ColorizeText(specName, r, g, b) or nil
@@ -501,7 +561,7 @@ function TED.Modules.PlayerInfo(tooltip, unit, specName, itemLevel, guid)
   end
 
   addSingleLine(tooltip, lineText)
-  markAdded(tooltip, "playerinfo", stateValue)
+  markAdded(tooltip, "playerinfo")
 end
 
 -- =========================
@@ -523,8 +583,11 @@ local function ApplyItemModules(tooltip, itemId, count)
 
   TED.Modules.ItemID(tooltip, itemId)
 
-  local iconId = GetItemIconByID and GetItemIconByID(itemId)
-  if iconId then
+  local okIcon, iconId = pcall(function()
+    return GetItemIconByID and GetItemIconByID(itemId)
+  end)
+
+  if okIcon and iconId then
     TED.Modules.IconID(tooltip, iconId)
   end
 end
@@ -538,8 +601,11 @@ local function ApplySpellModules(tooltip, spellId)
 
   TED.Modules.SpellID(tooltip, spellId)
 
-  local iconId = GetSpellTexture and GetSpellTexture(spellId)
-  if iconId then
+  local okIcon, iconId = pcall(function()
+    return GetSpellTexture and GetSpellTexture(spellId)
+  end)
+
+  if okIcon and iconId then
     TED.Modules.IconID(tooltip, iconId)
   end
 end
@@ -556,26 +622,24 @@ local function ApplyAHOwnedStack(tooltip, itemId)
   ApplyItemModules(tooltip, itemId, ownedCount)
 end
 
-local function ApplyPlayerInfoToTooltip(tooltip, unit, guid)
+local function ApplyPlayerInfoToTooltip(tooltip, unit)
   if not Enabled() then return end
   if not ModuleOn("playerinfo") then return end
   if not tooltip or not unit then return end
+  if type(unit) ~= "string" then return end
   if not UnitExists(unit) or not UnitIsPlayer(unit) then return end
 
-  guid = guid or UnitGUID(unit)
+  local guid = UnitGUID(unit)
   if not guid then return end
-
-  tooltip.TED_PlayerGUID = guid
 
   local cached = GetCachedInspectData(guid)
   if cached then
-    TED.Modules.PlayerInfo(tooltip, unit, cached.specName, cached.itemLevel, guid)
+    TED.Modules.PlayerInfo(tooltip, unit, cached.specName, cached.itemLevel)
     return
   end
 
   local capturedUnit = unit
   local capturedTooltip = tooltip
-  local capturedGUID = guid
   local delay = GetInspectDelay()
 
   if delay <= 0 then
@@ -586,8 +650,11 @@ local function ApplyPlayerInfoToTooltip(tooltip, unit, guid)
 
   C_Timer.After(delay, function()
     if not capturedTooltip or not capturedTooltip:IsShown() then return end
+    if type(capturedUnit) ~= "string" then return end
     if not UnitExists(capturedUnit) then return end
-    if UnitGUID(capturedUnit) ~= capturedGUID then return end
+    if not UnitIsPlayer(capturedUnit) then return end
+    if UnitIsUnit and UnitIsUnit(capturedUnit, "player") then return end
+
     QueueInspect(capturedUnit, capturedTooltip)
     ProcessInspectQueue()
   end)
@@ -988,19 +1055,10 @@ local function handleUnitFromTooltip(tooltip)
   if not ModuleOn("playerinfo") then return end
   if not tooltip then return end
 
-  local unit = GetTooltipUnit(tooltip)
-  if not unit or not UnitExists(unit) or not UnitIsPlayer(unit) then
-    return
-  end
+  local unit = ResolveInspectableUnit(tooltip)
+  if not unit then return end
 
-  if UnitIsUnit and UnitIsUnit(unit, "player") then
-    return
-  end
-
-  local guid = UnitGUID(unit)
-  if not guid then return end
-
-  ApplyPlayerInfoToTooltip(tooltip, unit, guid)
+  ApplyPlayerInfoToTooltip(tooltip, unit)
 end
 
 local function onSetHyperlink(tooltip, link)
@@ -1098,8 +1156,10 @@ local function hookActions()
     if not itemId then return end
 
     local count = GetActionCount and GetActionCount(slot)
+    count = NormalizeCount(count)
+
     if count == nil and GetItemCount then
-      count = GetItemCount(itemId)
+      count = GetOwnedItemCount(itemId)
     end
 
     ApplyItemModules(tooltip, itemId, count)
@@ -1168,72 +1228,55 @@ f:RegisterEvent("PLAYER_LOGIN")
 inspectFrame:RegisterEvent("INSPECT_READY")
 inspectFrame:SetScript("OnEvent", function(_, event, guid)
   if event ~= "INSPECT_READY" then return end
-  if not pendingInspectGUID or not pendingInspectUnit then return end
-  if guid and guid ~= pendingInspectGUID then return end
+  if not pendingInspectUnit then return end
+  if not guid then
+    if pendingInspectTooltip then
+      pendingInspectTooltip.TED_InspectPending = nil
+    end
+    pendingInspectUnit = nil
+    pendingInspectTooltip = nil
+    if ClearInspectPlayer then
+      SafeCall(ClearInspectPlayer)
+    end
+    ProcessInspectQueue()
+    return
+  end
 
   local currentTooltip = pendingInspectTooltip
-  local currentGUID = pendingInspectGUID
   local currentUnit = pendingInspectUnit
 
-  if not UnitExists(pendingInspectUnit) then
-    if currentTooltip and currentTooltip.TED_InspectPending == currentGUID then
-      currentTooltip.TED_InspectPending = nil
-    end
-    pendingInspectGUID = nil
-    pendingInspectUnit = nil
-    pendingInspectTooltip = nil
-    if ClearInspectPlayer then
-      ClearInspectPlayer()
-    end
-    ProcessInspectQueue()
-    return
-  end
-
-  local liveGUID = UnitGUID(pendingInspectUnit)
-  if liveGUID ~= pendingInspectGUID then
-    if currentTooltip and currentTooltip.TED_InspectPending == currentGUID then
-      currentTooltip.TED_InspectPending = nil
-    end
-    pendingInspectGUID = nil
-    pendingInspectUnit = nil
-    pendingInspectTooltip = nil
-    if ClearInspectPlayer then
-      ClearInspectPlayer()
-    end
-    ProcessInspectQueue()
-    return
-  end
-
-  local specID = GetInspectSpecialization and GetInspectSpecialization(pendingInspectUnit)
+  local specID = GetInspectSpecialization and GetInspectSpecialization(currentUnit)
   local specName = GetSpecNameByID(specID)
-  local itemLevel = C_PaperDollInfo and C_PaperDollInfo.GetInspectItemLevel and C_PaperDollInfo.GetInspectItemLevel(pendingInspectUnit)
+  local itemLevel = C_PaperDollInfo and C_PaperDollInfo.GetInspectItemLevel and C_PaperDollInfo.GetInspectItemLevel(currentUnit)
 
   if specName or (tonumber(itemLevel) and tonumber(itemLevel) > 0) then
-    SetCachedInspectData(pendingInspectGUID, {
+    SetCachedInspectData(guid, {
       specID = specID,
       specName = specName,
       itemLevel = itemLevel,
     })
+  end
 
-    if currentTooltip and currentTooltip:IsShown() then
-      local tooltipUnit = GetTooltipUnit(currentTooltip)
-      local tooltipGUID = tooltipUnit and UnitGUID(tooltipUnit)
-      if tooltipGUID == currentGUID then
-        TED.Modules.PlayerInfo(currentTooltip, currentUnit, specName, itemLevel, currentGUID)
+  if currentTooltip and currentTooltip:IsShown() then
+    local liveUnit = ResolveInspectableUnit(currentTooltip)
+    if liveUnit then
+      local liveGUID = UnitGUID(liveUnit)
+      local cached = liveGUID and GetCachedInspectData(liveGUID)
+      if cached then
+        TED.Modules.PlayerInfo(currentTooltip, liveUnit, cached.specName, cached.itemLevel)
       end
     end
   end
 
-  if currentTooltip and currentTooltip.TED_InspectPending == currentGUID then
+  if currentTooltip then
     currentTooltip.TED_InspectPending = nil
   end
 
-  pendingInspectGUID = nil
   pendingInspectUnit = nil
   pendingInspectTooltip = nil
 
   if ClearInspectPlayer then
-    ClearInspectPlayer()
+    SafeCall(ClearInspectPlayer)
   end
 
   ProcessInspectQueue()
@@ -1298,18 +1341,17 @@ f:SetScript("OnEvent", function(_, event, arg1)
       if not Enabled() or not ModuleOn("playerinfo") then return end
       if not self:IsShown() then return end
 
-      local unit = GetTooltipUnit(self)
-      if not unit or not UnitExists(unit) or not UnitIsPlayer(unit) then return end
-      if UnitIsUnit and UnitIsUnit(unit, "player") then return end
+      local unit = ResolveInspectableUnit(self)
+      if not unit then return end
 
       local guid = UnitGUID(unit)
       if not guid then return end
 
       local cached = GetCachedInspectData(guid)
       if cached then
-        TED.Modules.PlayerInfo(self, unit, cached.specName, cached.itemLevel, guid)
+        TED.Modules.PlayerInfo(self, unit, cached.specName, cached.itemLevel)
       elseif not self.TED_InspectPending then
-        ApplyPlayerInfoToTooltip(self, unit, guid)
+        ApplyPlayerInfoToTooltip(self, unit)
       end
     end)
 
@@ -1334,7 +1376,7 @@ f:SetScript("OnEvent", function(_, event, arg1)
     if not UnitExists(unit) or not UnitIsPlayer(unit) then return end
     if UnitIsUnit and UnitIsUnit(unit, "player") then return end
 
-    ApplyPlayerInfoToTooltip(GameTooltip, unit, UnitGUID(unit))
+    ApplyPlayerInfoToTooltip(GameTooltip, unit)
   end
 end)
 
