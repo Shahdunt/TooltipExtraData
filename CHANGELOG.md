@@ -5,6 +5,32 @@ All notable changes to this project will be documented in this file.
 The format is based on Keep a Changelog,
 and this project follows Semantic Versioning.
 
+## [1.4.0] - 2026-04-24
+
+### Fixed
+- Fixed a critical Lua error:
+- attempted to index a table that cannot be indexed with secret keys.
+- Replaced unsafe GUID-based table indexing with a safe Name-Realm key.
+- Fixed player item level (ilvl) disappearing from tooltips after inspect updates.
+- Fixed flickering of player ilvl/spec caused by tooltip re-rendering and stale state tracking.
+
+### Changed
+- Reworked inspect cache system to use a safe and stable key instead of GUID values.
+- Improved tooltip rendering logic to verify actual line presence instead of relying only on internal state flags.
+- Adjusted inspect request flow to allow re-fetching data when cache is missing without causing spam.
+
+### Performance
+- Prevented inspect requests while in combat.
+- Added per-unit inspect throttling to avoid repeated inspect calls.
+- Reduced reliance on OnUpdate for inspect triggering.
+- Increased inspect ticker interval to lower CPU usage.
+- Optimized inspect queue processing to minimize unnecessary API calls.
+
+### Stability
+- Improved compatibility with Retail security restrictions related to “secret” values.
+- Hardened tooltip update behavior during rapid mouseover changes.
+- Improved consistency of player info display across delayed inspect callbacks and tooltip refreshes.
+
 ## [1.3.2] - 2026-03-10
 
 ### Fixed
