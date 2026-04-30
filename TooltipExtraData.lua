@@ -347,15 +347,16 @@ local pendingInspectTooltip = nil
 local lastInspectRequestByKey = {}
 
 local function GetSafeUnitKey(unit)
-  if not unit or type(unit) ~= "string" then return nil end
+  -- Avoid UnitFullName() for inspect cache keys.
+  -- In modern Retail, UnitFullName() can return secret/tainted strings from tooltip-driven flows,
+  -- and comparing/concatenating those values can throw secure execution errors.
+  if unit ~= "mouseover" then return nil end
+  if not UnitExists or not UnitExists(unit) then return nil end
+  if not UnitIsPlayer or not UnitIsPlayer(unit) then return nil end
 
-  local okName, name, realm = pcall(UnitFullName, unit)
-  if okName and name and name ~= "" then
-    if not realm or realm == "" then
-      local okRealm, currentRealm = pcall(GetRealmName)
-      realm = okRealm and currentRealm or ""
-    end
-    return tostring(name) .. "-" .. tostring(realm or "")
+  local okGuid, guid = pcall(UnitGUID, unit)
+  if okGuid and type(guid) == "string" then
+    return guid
   end
 
   return nil
@@ -452,7 +453,7 @@ local function ProcessInspectQueue()
       local tooltip = entry.tooltip
       local unit = ResolveInspectableUnit(tooltip)
 
-      if tooltip and tooltip:IsShown() and unit and unit == entry.unit then
+      if tooltip and tooltip:IsShown() and unit then
         if CanInspect and CanInspect(unit, true) then
           pendingInspectUnit = unit
           pendingInspectTooltip = tooltip
@@ -579,27 +580,7 @@ function TED.Modules.IconID(tooltip, iconId)
   markAdded(tooltip, "iconid", iconId)
 end
 
-local function TooltipHasLine(tooltip, text)
-  if not tooltip or not text or text == "" then return false end
-
-  local name = getTooltipName(tooltip)
-  if not name then return false end
-
-  local okNum, numLines = pcall(tooltip.NumLines, tooltip)
-  if not okNum or not numLines then return false end
-
-  for i = 1, numLines do
-    local left = _G[name .. "TextLeft" .. i]
-    if left and left.GetText then
-      local okText, existing = pcall(left.GetText, left)
-      if okText and existing == text then
-        return true
-      end
-    end
-  end
-
-  return false
-end
+-- Tooltip line scanning intentionally disabled for player info to avoid secret string comparisons.
 
 -- ---- PlayerInfo module
 function TED.Modules.PlayerInfo(tooltip, unit, specName, itemLevel)
@@ -621,10 +602,10 @@ function TED.Modules.PlayerInfo(tooltip, unit, specName, itemLevel)
     lineText = Gray("[" .. ilevelText .. "]")
   end
 
-  -- El tooltip puede reconstruirse después de que llega INSPECT_READY.
-  -- Verificamos la línea real para evitar duplicados y reinsertarla si desaparece.
-  if TooltipHasLine(tooltip, lineText) then
-    markAdded(tooltip, "playerinfo")
+  -- Do not scan existing tooltip font strings here.
+  -- FontString:GetText() may return secret/tainted strings, and comparing them can throw
+  -- "attempt to compare ... secret string value" errors. Use our own per-tooltip state instead.
+  if wasAdded(tooltip, "playerinfo") then
     return
   end
 

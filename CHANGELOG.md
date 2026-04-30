@@ -5,6 +5,24 @@ All notable changes to this project will be documented in this file.
 The format is based on Keep a Changelog,
 and this project follows Semantic Versioning.
 
+## [1.4.1] - 2026-04-30
+
+### Fixed
+- Fixed a critical taint error caused by comparing tooltip text (GetText()) against addon-generated strings in TooltipHasLine.
+- Fixed a taint-related error triggered by comparing secret/tainted unit name strings returned by UnitFullName.
+- Fixed repeated errors: attempt to compare local 'existing' (a secret string value) in player tooltip handling.
+- Fixed repeated errors: attempt to compare local 'name' (a secret string value) in inspect key generation.
+
+### Changed
+- Reworked player tooltip deduplication logic to rely exclusively on internal tooltip state instead of scanning and comparing tooltip text.
+- Replaced inspect cache key generation from UnitFullName to UnitGUID for safer and taint-free identification.
+- Simplified inspect queue validation by removing unnecessary unit string comparisons.
+
+### Improved
+- Increased overall stability of the playerinfo module when interacting with secure/tainted tooltip data.
+- Reduced risk of UI taint propagation when hovering player tooltips repeatedly.
+- Improved compatibility with Blizzard's protected tooltip system in Retail.
+
 ## [1.4.0] - 2026-04-24
 
 ### Fixed
