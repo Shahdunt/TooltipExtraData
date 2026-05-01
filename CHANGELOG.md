@@ -5,6 +5,15 @@ All notable changes to this project will be documented in this file.
 The format is based on Keep a Changelog,
 and this project follows Semantic Versioning.
 
+## [1.4.2] - 2026-04-30
+
+### Fixed
+- Fixed a Retail tooltip taint error caused by using secret/tainted player GUID strings as inspect cache keys.
+- Fixed 'attempted to index a table that cannot be indexed with secret keys' during GameTooltip mouseover player info updates.
+- Reworked inspect cache/throttle keys to use an internal safe mouseover key instead of 'UnitGUID()', 'UnitName()', or 'UnitFullName()'.
+- Added safe table access helpers for inspect cache and inspect request throttling.
+- Cleared mouseover inspect state when tooltip unit or mouseover target changes to prevent stale inspect data.
+
 ## [1.4.1] - 2026-04-30
 
 ### Fixed
