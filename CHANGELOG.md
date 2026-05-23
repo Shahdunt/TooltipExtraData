@@ -5,6 +5,14 @@ All notable changes to this project will be documented in this file.
 The format is based on Keep a Changelog,
 and this project follows Semantic Versioning.
 
+## [1.4.3] - 2026-05-23
+
+### Added
+- Added player equipment repair percentage to player info tooltips.
+
+### Changed
+- Added more spacing between the options panel title/subtitle area and the first checkbox.
+
 ## [1.4.2] - 2026-04-30
 
 ### Fixed
@@ -112,6 +120,8 @@ and this project follows Semantic Versioning.
 
 ### Changed
 - Adjusted the visual alignment of IconID below ItemID/SpellID.
+- Updated the player info option text to include repair percentage.
 
 ### Fixed
 - Fixed stack display for usable items on action bars.
+- Hardened inspect cache and throttle table access against Retail secret/tainted keys.

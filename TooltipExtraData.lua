@@ -19,7 +19,7 @@ local defaults = {
     itemid     = true,  -- ItemID on item tooltips
     spellid    = true,  -- SpellID on spell tooltips
     iconid     = true,  -- IconID (texture FileID) below ItemID/SpellID
-    playerinfo = true,  -- player's spec + average item level via inspect
+    playerinfo = true,  -- player's spec, average item level, and repair percentage via inspect
   },
 }
 
@@ -109,6 +109,44 @@ local function SafeCompare(a, b)
   end)
 
   return ok and result or false
+end
+
+local function IsSafeTableKey(key)
+  local test = {}
+  local ok = pcall(function()
+    test[key] = true
+    test[key] = nil
+  end)
+
+  return ok
+end
+
+local function SafeTableGet(tbl, key)
+  if type(tbl) ~= "table" or key == nil then
+    return nil
+  end
+
+  local ok, value = pcall(function()
+    return tbl[key]
+  end)
+
+  if ok then
+    return value
+  end
+
+  return nil
+end
+
+local function SafeTableSet(tbl, key, value)
+  if type(tbl) ~= "table" or key == nil then
+    return false
+  end
+
+  local ok = pcall(function()
+    tbl[key] = value
+  end)
+
+  return ok
 end
 
 -- =========================
@@ -355,7 +393,7 @@ local function GetSafeUnitKey(unit)
   if not UnitIsPlayer or not UnitIsPlayer(unit) then return nil end
 
   local okGuid, guid = pcall(UnitGUID, unit)
-  if okGuid and type(guid) == "string" then
+  if okGuid and type(guid) == "string" and IsSafeTableKey(guid) then
     return guid
   end
 
@@ -366,18 +404,14 @@ local function GetCachedInspectData(unit)
   local key = GetSafeUnitKey(unit)
   if not key then return nil end
 
-  local ok, data = pcall(function()
-    return TED.InspectCache[key]
-  end)
-  if not ok or type(data) ~= "table" then
+  local data = SafeTableGet(TED.InspectCache, key)
+  if type(data) ~= "table" then
     return nil
   end
 
   local age = time() - (data.timestamp or 0)
   if age >= GetInspectCacheExpire() then
-    pcall(function()
-      TED.InspectCache[key] = nil
-    end)
+    SafeTableSet(TED.InspectCache, key, nil)
     return nil
   end
 
@@ -389,9 +423,7 @@ local function SetCachedInspectData(unit, data)
   if not key or type(data) ~= "table" then return end
 
   data.timestamp = time()
-  pcall(function()
-    TED.InspectCache[key] = data
-  end)
+  SafeTableSet(TED.InspectCache, key, data)
 end
 
 local function QueueInspect(unit, tooltip)
@@ -414,7 +446,8 @@ local function QueueInspect(unit, tooltip)
   end
 
   local now = GetTime and GetTime() or time()
-  if lastInspectRequestByKey[key] and (now - lastInspectRequestByKey[key]) < 3 then
+  local lastInspectRequest = SafeTableGet(lastInspectRequestByKey, key)
+  if lastInspectRequest and (now - lastInspectRequest) < 3 then
     return
   end
 
@@ -458,7 +491,7 @@ local function ProcessInspectQueue()
           pendingInspectUnit = unit
           pendingInspectTooltip = tooltip
           if entry.key then
-            lastInspectRequestByKey[entry.key] = GetTime and GetTime() or time()
+            SafeTableSet(lastInspectRequestByKey, entry.key, GetTime and GetTime() or time())
           end
           SafeCall(NotifyInspect, unit)
           return
@@ -500,6 +533,79 @@ local function FormatItemLevel(value)
   end
 
   return tostring(math.floor(value + 0.5))
+end
+
+local function FormatRepairPercent(value)
+  value = tonumber(value)
+  if not value or value < 0 then
+    return nil
+  end
+
+  if value > 100 then
+    value = 100
+  end
+
+  return tostring(math.floor(value + 0.5)) .. "%"
+end
+
+local durableInventorySlots = {
+  1,  -- Head
+  3,  -- Shoulder
+  5,  -- Chest
+  6,  -- Waist
+  7,  -- Legs
+  8,  -- Feet
+  9,  -- Wrist
+  10, -- Hands
+  16, -- Main hand
+  17, -- Off hand
+}
+
+local function ParseDurabilityLine(text)
+  if type(text) ~= "string" then
+    return nil, nil
+  end
+
+  local ok, current, max = pcall(function()
+    local currentText, maxText = text:match("(%d+)%s*/%s*(%d+)")
+    return tonumber(currentText), tonumber(maxText)
+  end)
+
+  if ok and current and max and max > 0 and current >= 0 and current <= max then
+    return current, max
+  end
+
+  return nil, nil
+end
+
+local function GetInspectRepairPercent(unit)
+  if not unit or type(unit) ~= "string" then return nil end
+  if not C_TooltipInfo or not C_TooltipInfo.GetInventoryItem then return nil end
+
+  local totalCurrent = 0
+  local totalMax = 0
+
+  for _, slot in ipairs(durableInventorySlots) do
+    if slot then
+      local okTooltip, tooltipData = pcall(C_TooltipInfo.GetInventoryItem, unit, slot)
+      if okTooltip and tooltipData and type(tooltipData.lines) == "table" then
+        for _, line in ipairs(tooltipData.lines) do
+          local current, max = ParseDurabilityLine(line and line.leftText)
+          if current and max then
+            totalCurrent = totalCurrent + current
+            totalMax = totalMax + max
+            break
+          end
+        end
+      end
+    end
+  end
+
+  if totalMax <= 0 then
+    return nil
+  end
+
+  return (totalCurrent / totalMax) * 100
 end
 
 -- =========================
@@ -583,12 +689,13 @@ end
 -- Tooltip line scanning intentionally disabled for player info to avoid secret string comparisons.
 
 -- ---- PlayerInfo module
-function TED.Modules.PlayerInfo(tooltip, unit, specName, itemLevel)
+function TED.Modules.PlayerInfo(tooltip, unit, specName, itemLevel, repairPercent)
   if not ModuleOn("playerinfo") then return end
   if not tooltip or not unit then return end
 
   local ilevelText = FormatItemLevel(itemLevel)
-  if not specName and not ilevelText then return end
+  local repairText = FormatRepairPercent(repairPercent)
+  if not specName and not ilevelText and not repairText then return end
 
   local r, g, b = GetUnitClassColor(unit)
   local coloredSpec = specName and ColorizeText(specName, r, g, b) or nil
@@ -598,19 +705,22 @@ function TED.Modules.PlayerInfo(tooltip, unit, specName, itemLevel)
     lineText = coloredSpec .. " " .. Gray("[" .. ilevelText .. "]")
   elseif coloredSpec then
     lineText = coloredSpec
-  else
+  elseif ilevelText then
     lineText = Gray("[" .. ilevelText .. "]")
   end
 
   -- Do not scan existing tooltip font strings here.
   -- FontString:GetText() may return secret/tainted strings, and comparing them can throw
   -- "attempt to compare ... secret string value" errors. Use our own per-tooltip state instead.
-  if wasAdded(tooltip, "playerinfo") then
-    return
+  if lineText and not wasAdded(tooltip, "playerinfo") then
+    addSingleLine(tooltip, lineText)
+    markAdded(tooltip, "playerinfo")
   end
 
-  addSingleLine(tooltip, lineText)
-  markAdded(tooltip, "playerinfo")
+  if repairText and not wasAdded(tooltip, "playerrepair") then
+    addSingleLine(tooltip, Gray("Repair: [" .. repairText .. "]"))
+    markAdded(tooltip, "playerrepair")
+  end
 end
 
 -- =========================
@@ -680,7 +790,7 @@ local function ApplyPlayerInfoToTooltip(tooltip, unit)
 
   local cached = GetCachedInspectData(unit)
   if cached then
-    TED.Modules.PlayerInfo(tooltip, unit, cached.specName, cached.itemLevel)
+    TED.Modules.PlayerInfo(tooltip, unit, cached.specName, cached.itemLevel, cached.repairPercent)
     return
   end
 
@@ -1294,12 +1404,14 @@ inspectFrame:SetScript("OnEvent", function(_, event, guid)
   local specID = GetInspectSpecialization and GetInspectSpecialization(currentUnit)
   local specName = GetSpecNameByID(specID)
   local itemLevel = C_PaperDollInfo and C_PaperDollInfo.GetInspectItemLevel and C_PaperDollInfo.GetInspectItemLevel(currentUnit)
+  local repairPercent = GetInspectRepairPercent(currentUnit)
 
-  if specName or (tonumber(itemLevel) and tonumber(itemLevel) > 0) then
+  if specName or (tonumber(itemLevel) and tonumber(itemLevel) > 0) or repairPercent then
     SetCachedInspectData(currentUnit, {
       specID = specID,
       specName = specName,
       itemLevel = itemLevel,
+      repairPercent = repairPercent,
     })
   end
 
@@ -1308,7 +1420,7 @@ inspectFrame:SetScript("OnEvent", function(_, event, guid)
     if liveUnit then
       local cached = GetCachedInspectData(liveUnit)
       if cached then
-        TED.Modules.PlayerInfo(currentTooltip, liveUnit, cached.specName, cached.itemLevel)
+        TED.Modules.PlayerInfo(currentTooltip, liveUnit, cached.specName, cached.itemLevel, cached.repairPercent)
       end
     end
   end
@@ -1396,7 +1508,7 @@ f:SetScript("OnEvent", function(_, event, arg1)
 
       local cached = GetCachedInspectData(unit)
       if cached then
-        TED.Modules.PlayerInfo(self, unit, cached.specName, cached.itemLevel)
+        TED.Modules.PlayerInfo(self, unit, cached.specName, cached.itemLevel, cached.repairPercent)
       elseif not self.TED_InspectPending then
         ApplyPlayerInfoToTooltip(self, unit)
       end
@@ -1533,7 +1645,7 @@ panel:SetScript("OnShow", function(self)
     function() return TooltipExtraDataDB.enabled end,
     function(v) TooltipExtraDataDB.enabled = v end
   )
-  enabledCB:SetPoint("TOPLEFT", title, "BOTTOMLEFT", 0, -16)
+  enabledCB:SetPoint("TOPLEFT", sub, "BOTTOMLEFT", 0, -12)
   table.insert(self._checks, enabledCB)
 
   local stackCB = CreateCheck(
@@ -1578,8 +1690,8 @@ panel:SetScript("OnShow", function(self)
 
   local playerInfoCB = CreateCheck(
     self,
-    "Show Player Spec + ItemLvl",
-    "Uses inspect data to add specialization and average item level to player tooltips.",
+    "Show Player Spec + ItemLvl + Repair",
+    "Uses inspect data to add specialization, average item level, and equipment repair percentage to player tooltips.",
     function() return TooltipExtraDataDB.modules.playerinfo end,
     function(v) TooltipExtraDataDB.modules.playerinfo = v end
   )
