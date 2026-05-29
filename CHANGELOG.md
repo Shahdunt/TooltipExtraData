@@ -5,6 +5,17 @@ All notable changes to this project will be documented in this file.
 The format is based on Keep a Changelog,
 and this project follows Semantic Versioning.
 
+## [1.4.4] - 2026-05-28
+
+### Added
+- Added option to show your own specialization, average item level, and equipment repair percentage on your own player tooltip (`playerself`). This option is enabled by default.
+- Added a checkbox in the addon options: "Show Own Spec + ItemLvl + Repair" and a slash toggle `/ted playerself`.
+
+### Changed
+- Reused the existing `playerinfo` rendering code for the player's own tooltip when `playerself` is enabled.
+- Added local fallbacks to obtain the player's specialization and item level (`GetInspectSpecialization`/`C_SpecializationInfo.GetInspectSpecialization` and `GetAverageItemLevel`) when direct APIs return nil.
+- Adjusted inspect/resolve logic to safely allow the `player` unit when `playerself` is enabled while preserving existing taint-safe behavior for mouseover inspections.
+
 ## [1.4.3] - 2026-05-23
 
 ### Added

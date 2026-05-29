@@ -19,7 +19,8 @@ local defaults = {
     itemid     = true,  -- ItemID on item tooltips
     spellid    = true,  -- SpellID on spell tooltips
     iconid     = true,  -- IconID (texture FileID) below ItemID/SpellID
-    playerinfo = true,  -- player's spec, average item level, and repair percentage via inspect
+    playerinfo = true,  -- target player's spec, average item level, and repair percentage via inspect
+    playerself = true,  -- own player's spec/item level/repair shown on your own tooltip
   },
 }
 
@@ -365,7 +366,11 @@ local function ResolveInspectableUnit(tooltip)
 
   if not UnitExists(unit) then return nil end
   if not UnitIsPlayer(unit) then return nil end
-  if UnitIsUnit and UnitIsUnit(unit, "player") then return nil end
+  if UnitIsUnit and UnitIsUnit(unit, "player") then
+    if not ModuleOn("playerself") then
+      return nil
+    end
+  end
   if UnitIsConnected and not UnitIsConnected(unit) then return nil end
   if CanInspect and not CanInspect(unit, true) then return nil end
 
@@ -690,7 +695,8 @@ end
 
 -- ---- PlayerInfo module
 function TED.Modules.PlayerInfo(tooltip, unit, specName, itemLevel, repairPercent)
-  if not ModuleOn("playerinfo") then return end
+  -- Allow for target info (`playerinfo`) or own-player tooltip when `playerself` enabled
+  if not (ModuleOn("playerinfo") or (unit == "player" and ModuleOn("playerself"))) then return end
   if not tooltip or not unit then return end
 
   local ilevelText = FormatItemLevel(itemLevel)
@@ -783,10 +789,49 @@ end
 
 local function ApplyPlayerInfoToTooltip(tooltip, unit)
   if not Enabled() then return end
-  if not ModuleOn("playerinfo") then return end
+  if not (ModuleOn("playerinfo") or ModuleOn("playerself")) then return end
   if not tooltip or not unit then return end
   if type(unit) ~= "string" then return end
   if not UnitExists(unit) or not UnitIsPlayer(unit) then return end
+  -- Special-case: if the unit is the player themselves and the `playerself` option
+  -- is enabled, fetch local data immediately (no inspect queue).
+  if UnitIsUnit and UnitIsUnit(unit, "player") and ModuleOn("playerself") then
+    local specName = nil
+    if GetSpecialization then
+      local specIndex = GetSpecialization()
+      if specIndex and specIndex > 0 then
+        local _, name = GetSpecializationInfo(specIndex)
+        specName = name
+      end
+    end
+
+    -- Fallback: try inspect-style API to get spec ID/name for player
+    if not specName and (GetInspectSpecialization or (C_SpecializationInfo and C_SpecializationInfo.GetInspectSpecialization)) then
+      local ok, specID = pcall(function()
+        if GetInspectSpecialization then
+          return GetInspectSpecialization("player")
+        elseif C_SpecializationInfo and C_SpecializationInfo.GetInspectSpecialization then
+          return C_SpecializationInfo.GetInspectSpecialization("player")
+        end
+      end)
+      if ok and specID and specID > 0 then
+        specName = GetSpecNameByID(specID)
+      end
+    end
+
+    local itemLevel = (C_PaperDollInfo and C_PaperDollInfo.GetInspectItemLevel and C_PaperDollInfo.GetInspectItemLevel("player"))
+    -- Fallback: use GetAverageItemLevel when available
+    if (not itemLevel or tonumber(itemLevel) == 0) and GetAverageItemLevel then
+      local ok, avg = pcall(function() return GetAverageItemLevel() end)
+      if ok and avg and tonumber(avg) then
+        itemLevel = avg
+      end
+    end
+    local repairPercent = GetInspectRepairPercent("player")
+
+    TED.Modules.PlayerInfo(tooltip, unit, specName, itemLevel, repairPercent)
+    return
+  end
 
   local cached = GetCachedInspectData(unit)
   if cached then
@@ -1574,6 +1619,10 @@ SlashCmdList.TOOLTIPEXTRADATA = function(msg)
     TooltipExtraDataDB.modules.playerinfo = not TooltipExtraDataDB.modules.playerinfo
     print("TooltipExtraData: playerinfo = " .. tostring(TooltipExtraDataDB.modules.playerinfo))
 
+  elseif msg == "playerself" or msg == "self" then
+    TooltipExtraDataDB.modules.playerself = not TooltipExtraDataDB.modules.playerself
+    print("TooltipExtraData: playerself = " .. tostring(TooltipExtraDataDB.modules.playerself))
+
   else
     print("TooltipExtraData commands:")
     print("/ted on | off")
@@ -1697,6 +1746,16 @@ panel:SetScript("OnShow", function(self)
   )
   playerInfoCB:SetPoint("TOPLEFT", iconIdCB, "BOTTOMLEFT", 0, -10)
   table.insert(self._checks, playerInfoCB)
+
+  local playerSelfCB = CreateCheck(
+    self,
+    "Show Own Spec + ItemLvl + Repair",
+    "Shows your own specialization, average item level, and equipment repair percentage on your own player tooltip.",
+    function() return TooltipExtraDataDB.modules.playerself end,
+    function(v) TooltipExtraDataDB.modules.playerself = v end
+  )
+  playerSelfCB:SetPoint("TOPLEFT", playerInfoCB, "BOTTOMLEFT", 0, -10)
+  table.insert(self._checks, playerSelfCB)
 
   local hint = self:CreateFontString(nil, "ARTWORK", "GameFontDisableSmall")
   hint:SetPoint("TOPLEFT", playerInfoCB, "BOTTOMLEFT", 2, -14)
